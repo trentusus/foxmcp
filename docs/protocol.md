@@ -1,13 +1,38 @@
 # WebSocket Message Protocol
 
-## Connection Constraints
+## Connection Model
 
-**IMPORTANT: Only one extension connection is allowed at a time.**
+The FoxMCP server can keep multiple Firefox extension WebSocket connections open at the same time. This allows separate Firefox profiles, such as `foxmcp` and `kodens`, to connect to one MCP server without one profile disconnecting the other.
 
-- The FoxMCP server accepts only one active WebSocket connection from a browser extension
-- If a new connection arrives, the existing connection is automatically closed
-- The extension disconnects any existing connection before creating a new one
-- This prevents connection races, resource conflicts, and multiple extension instances
+- Each extension WebSocket receives a server-assigned connection ID, for example `conn_20d5043c4ba4`
+- The most recently connected extension becomes the default active connection for backward compatibility
+- MCP clients can list connections with `connections_list`
+- MCP clients can change the default target with `connections_select`
+- Existing browser tools continue to work without a routing parameter and use the active connection
+- Low-level requests may include `connection_id`, `connectionId`, or `profile` in `data` for explicit routing
+
+The extension sends a best-effort `hello` message after opening the WebSocket. Firefox WebExtensions do not expose the profile path/name directly, so profile labels are optional metadata rather than guaranteed browser-provided identity.
+
+### Connection Hello
+
+```json
+{
+  "id": "hello_1760000000000_abcd1234",
+  "type": "hello",
+  "action": "connection.hello",
+  "data": {
+    "profileName": "foxmcp",
+    "connectionName": "foxmcp",
+    "extensionId": "foxmcp@codemud.org",
+    "extensionOrigin": "moz-extension://...",
+    "configuredHost": "localhost",
+    "configuredPort": 8765
+  },
+  "timestamp": "2025-09-03T12:00:00.000Z"
+}
+```
+
+`profileName` and `connectionName` are read from `browser.storage.local` first, then `browser.storage.sync`. If they are not configured, use `connections_list` and select by connection ID.
 
 ## Message Structure
 

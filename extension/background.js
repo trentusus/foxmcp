@@ -4,7 +4,7 @@
  * Licensed under the MIT License - see LICENSE file for details
  */
 
-// SINGLE CONNECTION CONSTRAINT: Only one WebSocket connection to MCP server allowed
+// Each extension instance keeps one WebSocket connection to the MCP server.
 let websocket = null;
 let isConnected = false;
 
@@ -132,6 +132,8 @@ function connectToMCPServer() {
       retryAttempts = 0; // Reset retry counter on successful connection
       connectionRetryAttempts = 0; // Reset connection retry counter
 
+      sendConnectionHello();
+
       // Send an immediate debug message to test after a small delay
       setTimeout(() => {
         console.log('🔌 WebSocket connection established and ready');
@@ -163,6 +165,76 @@ function connectToMCPServer() {
   } catch (error) {
     console.error('Failed to connect to MCP server:', error);
     scheduleReconnect();
+  }
+}
+
+async function buildConnectionMetadata() {
+  let localIdentity = {};
+  let syncIdentity = {};
+  let platformInfo = {};
+
+  try {
+    localIdentity = await browser.storage.local.get({
+      profileName: null,
+      connectionName: null,
+      foxmcpProfileName: null
+    });
+  } catch (error) {
+    console.log('Could not load local connection identity:', error);
+  }
+
+  try {
+    syncIdentity = await browser.storage.sync.get({
+      profileName: null,
+      connectionName: null,
+      foxmcpProfileName: null
+    });
+  } catch (error) {
+    console.log('Could not load sync connection identity:', error);
+  }
+
+  try {
+    if (browser.runtime.getPlatformInfo) {
+      platformInfo = await browser.runtime.getPlatformInfo();
+    }
+  } catch (error) {
+    console.log('Could not load platform info:', error);
+  }
+
+  const profileName = (
+    localIdentity.profileName ||
+    localIdentity.foxmcpProfileName ||
+    syncIdentity.profileName ||
+    syncIdentity.foxmcpProfileName ||
+    null
+  );
+
+  return {
+    profileName,
+    connectionName: localIdentity.connectionName || syncIdentity.connectionName || profileName,
+    extensionId: browser.runtime.id,
+    extensionOrigin: browser.runtime.getURL(''),
+    userAgent: navigator.userAgent,
+    platform: platformInfo,
+    configuredHost: CONFIG.hostname,
+    configuredPort: CONFIG.port
+  };
+}
+
+async function sendConnectionHello() {
+  if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+
+  try {
+    const metadata = await buildConnectionMetadata();
+    websocket.send(JSON.stringify({
+      id: `hello_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      type: 'hello',
+      action: 'connection.hello',
+      data: metadata,
+      timestamp: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.error('Failed to send connection hello:', error);
   }
 }
 

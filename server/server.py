@@ -16,6 +16,7 @@ import os
 import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
+import uuid
 
 import websockets
 import uvicorn
@@ -90,8 +91,11 @@ class FoxMCPServer:
         logger.info(f"MCP server will use port {self.mcp_port}")
         self.start_mcp = start_mcp
 
-        # SINGLE CONNECTION CONSTRAINT: Only one extension connection allowed
+        # Backward-compatible alias for the selected extension connection.
         self.extension_connection = None
+        self.active_connection_id = None
+        self.connected_clients = {}  # Map of connection IDs to connection metadata
+        self._websocket_connection_ids = {}  # Map of websocket objects to connection IDs
         self.pending_requests = {}  # Map of request IDs to Future objects
 
         # Connection event management
@@ -108,38 +112,142 @@ class FoxMCPServer:
 
     async def handle_extension_connection(self, websocket):
         """Handle WebSocket connection from browser extension
-
-        IMPORTANT: Only ONE extension connection is allowed at a time.
-        If a new connection arrives, the existing one is closed first.
-        This prevents multiple extensions or connection races.
         """
-        logger.info(f"Extension connected from {websocket.remote_address}")
-
-        # CONSTRAINT: Only one extension connection allowed at a time
-        # Close existing connection if there is one to maintain single connection policy
-        if self.extension_connection and self.extension_connection.close_code is None:
-            logger.info("Closing existing extension connection for new one")
-            try:
-                await self.extension_connection.close()
-            except Exception as e:
-                logger.warning(f"Error closing existing connection: {e}")
-
-        self.extension_connection = websocket
+        connection_id = self._register_connection(websocket)
+        logger.info(f"Extension connected from {websocket.remote_address} as {connection_id}")
 
         # Notify all waiters that a connection has been established
         self._notify_connection_waiters()
 
         try:
             async for message in websocket:
-                await self.handle_extension_message(message)
+                await self.handle_extension_message(message, websocket=websocket)
         except ConnectionAbortedError:
-            logger.info("Extension disconnected")
+            logger.info(f"Extension disconnected: {connection_id}")
         except Exception as e:
-            logger.error(f"Error handling extension connection: {e}")
+            logger.error(f"Error handling extension connection {connection_id}: {e}")
         finally:
-            self.extension_connection = None
+            self._unregister_connection(websocket)
 
-    async def handle_extension_message(self, message: str):
+    def _is_websocket_open(self, websocket) -> bool:
+        if websocket is None:
+            return False
+
+        if getattr(websocket, "closed", False) is True:
+            return False
+
+        close_code = getattr(websocket, "close_code", None)
+        if close_code is None:
+            return True
+
+        # Unit tests and older callers may assign plain Mock objects to
+        # extension_connection; their attributes are mock sentinels, not close codes.
+        return not isinstance(close_code, int)
+
+    def _register_connection(self, websocket) -> str:
+        connection_id = f"conn_{uuid.uuid4().hex[:12]}"
+        now = datetime.now().isoformat()
+        self.connected_clients[connection_id] = {
+            "id": connection_id,
+            "websocket": websocket,
+            "remote_address": str(getattr(websocket, "remote_address", "unknown")),
+            "connected_at": now,
+            "last_seen": now,
+            "metadata": {},
+        }
+        self._websocket_connection_ids[websocket] = connection_id
+        self.active_connection_id = connection_id
+        self.extension_connection = websocket
+        return connection_id
+
+    def _unregister_connection(self, websocket):
+        connection_id = self._websocket_connection_ids.pop(websocket, None)
+        if not connection_id:
+            return
+
+        self.connected_clients.pop(connection_id, None)
+
+        if self.active_connection_id == connection_id:
+            self.active_connection_id = None
+            self.extension_connection = None
+            for candidate_id, connection in reversed(list(self.connected_clients.items())):
+                candidate_websocket = connection.get("websocket")
+                if self._is_websocket_open(candidate_websocket):
+                    self.active_connection_id = candidate_id
+                    self.extension_connection = candidate_websocket
+                    break
+        elif self.extension_connection is websocket:
+            active_connection = self.connected_clients.get(self.active_connection_id or "")
+            self.extension_connection = active_connection.get("websocket") if active_connection else None
+
+    def _update_connection_metadata(self, websocket, metadata: Dict[str, Any]):
+        connection_id = self._websocket_connection_ids.get(websocket)
+        if not connection_id or connection_id not in self.connected_clients:
+            return
+
+        connection = self.connected_clients[connection_id]
+        connection["metadata"].update(metadata or {})
+        connection["last_seen"] = datetime.now().isoformat()
+        logger.info(f"Updated extension metadata for {connection_id}: {connection['metadata']}")
+
+    def _resolve_connection_id(self, connection_id: Optional[str] = None, profile: Optional[str] = None) -> Optional[str]:
+        identifier = connection_id or profile
+        if not identifier:
+            return self.active_connection_id
+
+        if identifier in self.connected_clients:
+            return identifier
+
+        identifier_lower = str(identifier).lower()
+        matches = []
+        for candidate_id, connection in self.connected_clients.items():
+            metadata = connection.get("metadata", {})
+            aliases = [
+                candidate_id,
+                metadata.get("connectionId"),
+                metadata.get("profile"),
+                metadata.get("profileName"),
+                metadata.get("connectionName"),
+                metadata.get("displayName"),
+                metadata.get("extensionOrigin"),
+            ]
+            if any(alias and str(alias).lower() == identifier_lower for alias in aliases):
+                matches.append(candidate_id)
+
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def list_connections(self):
+        connections = []
+        for connection_id, connection in self.connected_clients.items():
+            websocket = connection.get("websocket")
+            metadata = connection.get("metadata", {})
+            connections.append({
+                "id": connection_id,
+                "active": connection_id == self.active_connection_id,
+                "open": self._is_websocket_open(websocket),
+                "remote_address": connection.get("remote_address"),
+                "connected_at": connection.get("connected_at"),
+                "last_seen": connection.get("last_seen"),
+                "metadata": metadata,
+            })
+        return connections
+
+    def select_connection(self, identifier: str) -> bool:
+        connection_id = self._resolve_connection_id(connection_id=identifier)
+        if not connection_id:
+            return False
+
+        websocket = self.connected_clients[connection_id].get("websocket")
+        if not self._is_websocket_open(websocket):
+            return False
+
+        self.active_connection_id = connection_id
+        self.extension_connection = websocket
+        return True
+
+    async def handle_extension_message(self, message: str, websocket=None):
         """Process message from browser extension"""
         try:
             data = json.loads(message)
@@ -160,12 +268,16 @@ class FoxMCPServer:
                     logger.info(f"🔵 EXTENSION LOG [{timestamp}]: {log_message}")
                 return
 
+            if message_type in ['hello', 'connection.hello']:
+                self._update_connection_metadata(websocket, data.get('data', {}))
+                return
+
             logger.info(f"Received from extension: {message_type} - {action} (ID: {message_id})")
 
             if message_type == 'request':
                 # Handle ping-pong for connection testing
                 if action == 'ping':
-                    await self.handle_ping_request(data)
+                    await self.handle_ping_request(data, websocket=websocket)
                     return
 
             elif message_type in ['response', 'error']:
@@ -196,7 +308,7 @@ class FoxMCPServer:
         else:
             logger.warning(f"Received response for unknown request: {request_id}")
 
-    async def handle_ping_request(self, request: Dict[str, Any]):
+    async def handle_ping_request(self, request: Dict[str, Any], websocket=None):
         """Handle ping request from extension"""
         response = {
             "id": request["id"],
@@ -206,7 +318,8 @@ class FoxMCPServer:
             "timestamp": datetime.now().isoformat()
         }
 
-        success = await self.send_to_extension(response)
+        connection_id = self._websocket_connection_ids.get(websocket)
+        success = await self.send_to_extension(response, connection_id=connection_id)
         if success:
             logger.info(f"Sent ping request to extension: {request['id']}")
         else:
@@ -215,7 +328,7 @@ class FoxMCPServer:
 
     async def test_ping_extension(self) -> Dict[str, Any]:
         """Send ping to extension and wait for response"""
-        if not self.extension_connection:
+        if not self._get_connection_websocket():
             return {"success": False, "error": "No extension connection"}
 
         test_id = f"server_ping_{int(datetime.now().timestamp() * 1000)}"
@@ -234,27 +347,54 @@ class FoxMCPServer:
         else:
             return {"success": False, "error": "Failed to send ping"}
 
-    async def send_to_extension(self, message: Dict[str, Any]) -> bool:
+    def _get_connection_websocket(self, connection_id: Optional[str] = None, profile: Optional[str] = None):
+        resolved_id = self._resolve_connection_id(connection_id=connection_id, profile=profile)
+        if resolved_id:
+            connection = self.connected_clients.get(resolved_id)
+            websocket = connection.get("websocket") if connection else None
+            if self._is_websocket_open(websocket):
+                return websocket
+
+        if not connection_id and not profile and self._is_websocket_open(self.extension_connection):
+            return self.extension_connection
+
+        return None
+
+    async def send_to_extension(self, message: Dict[str, Any], connection_id: Optional[str] = None, profile: Optional[str] = None) -> bool:
         """Send message to browser extension"""
-        if not self.extension_connection:
+        websocket = self._get_connection_websocket(connection_id=connection_id, profile=profile)
+        if not websocket:
             logger.warning("No extension connection available")
             return False
 
         try:
             message['timestamp'] = datetime.now().isoformat()
-            await self.extension_connection.send(json.dumps(message))
+            await websocket.send(json.dumps(message))
             return True
         except Exception as e:
             logger.error(f"Error sending to extension: {e}")
             return False
 
-    async def send_request_and_wait(self, request: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
+    async def send_request_and_wait(
+        self,
+        request: Dict[str, Any],
+        timeout: float = 30.0,
+        connection_id: Optional[str] = None,
+        profile: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Send request to extension and wait for response"""
         request_id = request.get('id')
         if not request_id:
             raise ValueError("Request must have an ID")
 
-        if not self.extension_connection:
+        data = request.get("data") if isinstance(request.get("data"), dict) else {}
+        connection_id = connection_id or data.pop("connection_id", None) or data.pop("connectionId", None)
+        profile = profile or data.pop("profile", None)
+
+        if not self._get_connection_websocket(connection_id=connection_id, profile=profile):
+            target = connection_id or profile
+            if target:
+                return {"error": f"No extension connection available for {target}"}
             return {"error": "No extension connection available"}
 
         # Create future for response
@@ -263,7 +403,7 @@ class FoxMCPServer:
 
         try:
             # Send the request
-            success = await self.send_to_extension(request)
+            success = await self.send_to_extension(request, connection_id=connection_id, profile=profile)
             if not success:
                 self.pending_requests.pop(request_id, None)
                 return {"error": "Failed to send request to extension"}
@@ -461,7 +601,7 @@ class FoxMCPServer:
                 print("Connection timeout")
         """
         # If already connected, return immediately
-        if self.extension_connection and self.extension_connection.close_code is None:
+        if self._get_connection_websocket():
             return True
 
         # Create a future to wait for connection
@@ -545,22 +685,27 @@ class FoxMCPServer:
             except Exception as e:
                 logger.warning(f"Error stopping MCP server: {e}")
 
-    def _stop_websocket_server(self):
+    async def _stop_websocket_server(self):
         """Stop the WebSocket server gracefully"""
         if self.websocket_server:
             try:
                 logger.info("Stopping WebSocket server...")
 
                 # Close all existing connections first
-                if self.extension_connection:
+                for connection_id, connection in list(self.connected_clients.items()):
+                    websocket = connection.get("websocket")
                     try:
-                        # Properly close the WebSocket connection (sync call)
-                        self.extension_connection.close()
-                        logger.info("Extension connection closed")
+                        close_result = websocket.close()
+                        if asyncio.iscoroutine(close_result):
+                            await close_result
+                        logger.info(f"Extension connection closed: {connection_id}")
                     except Exception as e:
-                        logger.warning(f"Error closing extension connection: {e}")
-                    finally:
-                        self.extension_connection = None
+                        logger.warning(f"Error closing extension connection {connection_id}: {e}")
+
+                self.connected_clients.clear()
+                self._websocket_connection_ids.clear()
+                self.active_connection_id = None
+                self.extension_connection = None
 
                 # Close the WebSocket server
                 self.websocket_server.close()
@@ -573,7 +718,7 @@ class FoxMCPServer:
             except Exception as e:
                 logger.warning(f"Error stopping WebSocket server: {e}")
 
-    def _stop(self):
+    async def _stop(self):
         """Stop all servers (WebSocket and MCP)"""
         logger.info("Stopping FoxMCP server...")
 
@@ -581,7 +726,7 @@ class FoxMCPServer:
         self._stop_mcp_server()
 
         # Stop WebSocket server
-        self._stop_websocket_server()
+        await self._stop_websocket_server()
 
         logger.info("FoxMCP server stopped")
 
@@ -594,7 +739,7 @@ class FoxMCPServer:
         """
         try:
             # Stop server resources first
-            self._stop()
+            await self._stop()
 
             # Cancel the task
             server_task.cancel()

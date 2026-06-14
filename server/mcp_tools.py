@@ -44,6 +44,7 @@ class FoxMCPTools:
 
     def _setup_tools(self):
         """Set up all MCP tool definitions"""
+        self._setup_connection_tools()
         self._setup_window_tools()
         self._setup_tab_tools()
         self._setup_history_tools()
@@ -51,6 +52,72 @@ class FoxMCPTools:
         self._setup_navigation_tools()
         self._setup_content_tools()
         self._setup_request_monitoring_tools()
+
+    def _with_route(
+        self,
+        data: Dict[str, Any],
+        connection_id: Optional[str] = None,
+        profile: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Add optional connection routing fields to request data."""
+        if connection_id:
+            data["connection_id"] = connection_id
+        if profile:
+            data["profile"] = profile
+        return data
+
+    def _setup_connection_tools(self):
+        """Setup browser extension connection routing tools"""
+
+        @self.mcp.tool()
+        async def connections_list() -> str:
+            """
+            List connected Firefox extension sessions.
+
+            Use the connection ID with connections_select, or pass connection_id/profile in request data
+            for tools that support explicit routing.
+            """
+            if not hasattr(self.websocket_server, "list_connections"):
+                return "Connection listing is not supported by this server"
+
+            connections = self.websocket_server.list_connections()
+            if not connections:
+                return "No Firefox extension connections are currently available"
+
+            result = f"Firefox extension connections ({len(connections)} found):\n"
+            for connection in connections:
+                metadata = connection.get("metadata", {})
+                active = " (active)" if connection.get("active") else ""
+                open_status = "open" if connection.get("open") else "closed"
+                label = (
+                    metadata.get("profileName")
+                    or metadata.get("connectionName")
+                    or metadata.get("displayName")
+                    or metadata.get("extensionOrigin")
+                    or "unlabeled"
+                )
+                result += (
+                    f"- {connection.get('id')}: {label}, {open_status}, "
+                    f"remote {connection.get('remote_address')}{active}\n"
+                )
+            return result
+
+        @self.mcp.tool()
+        async def connections_select(connection: str) -> str:
+            """
+            Select the default Firefox extension session for subsequent tools.
+
+            Args:
+                connection: Connection ID or exact configured profile/connection name
+            """
+            if not hasattr(self.websocket_server, "select_connection"):
+                return "Connection selection is not supported by this server"
+
+            if self.websocket_server.select_connection(connection):
+                active_id = getattr(self.websocket_server, "active_connection_id", connection)
+                return f"Selected Firefox extension connection: {active_id}"
+
+            return f"Unable to find an open Firefox extension connection matching: {connection}"
 
     def _setup_window_tools(self):
         """Setup window management tools"""
@@ -62,7 +129,7 @@ class FoxMCPTools:
             
             Args:
                 populate: Whether to include tab information for each window
-                
+
             Returns:
                 String containing list of windows with their details
             """
@@ -391,10 +458,17 @@ class FoxMCPTools:
 
         # Tab List Tool
         @self.mcp.tool()
-        async def tabs_list() -> str:
+        async def tabs_list(
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """
             List all open browser tabs
             
+            Args:
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
+
             Returns:
                 Formatted string with tab information:
                 "Open tabs ({count} found):
@@ -408,7 +482,7 @@ class FoxMCPTools:
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "tabs.list",
-                "data": {},
+                "data": self._with_route({}, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -439,7 +513,9 @@ class FoxMCPTools:
             url: str,
             active: bool = True,
             pinned: bool = False,
-            window_id: Optional[Union[int, str]] = None
+            window_id: Optional[Union[int, str]] = None,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
         ) -> str:
             """Create a new browser tab
 
@@ -448,6 +524,8 @@ class FoxMCPTools:
                 active: Whether the tab should be active (default: True)
                 pinned: Whether the tab should be pinned (default: False)
                 window_id: Window ID to create tab in (optional, accepts int or string)
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             # Convert window_id to int if it's a string (for MCP client compatibility)
             if window_id is not None and isinstance(window_id, str):
@@ -460,12 +538,12 @@ class FoxMCPTools:
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "tabs.create",
-                "data": {
+                "data": self._with_route({
                     "url": url,
                     "active": active,
                     "pinned": pinned,
                     **({"windowId": window_id} if window_id else {})
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -482,19 +560,25 @@ class FoxMCPTools:
 
         # Tab Close Tool
         @self.mcp.tool()
-        async def tabs_close(tab_id: int) -> str:
+        async def tabs_close(
+            tab_id: int,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Close a browser tab
 
             Args:
                 tab_id: ID of the tab to close
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "tabs.close",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -513,19 +597,25 @@ class FoxMCPTools:
 
         # Tab Switch Tool
         @self.mcp.tool()
-        async def tabs_switch(tab_id: int) -> str:
+        async def tabs_switch(
+            tab_id: int,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Switch to a specific browser tab
 
             Args:
                 tab_id: ID of the tab to switch to
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "tabs.switch",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -548,7 +638,9 @@ class FoxMCPTools:
             filename: Optional[str] = None,
             window_id: Optional[int] = None,
             format: str = "png",
-            quality: int = 90
+            quality: int = 90,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
         ) -> str:
             """Capture a screenshot of the visible tab
 
@@ -557,6 +649,8 @@ class FoxMCPTools:
                 window_id: ID of the window to capture (optional, defaults to current window)
                 format: Image format ('png' or 'jpeg', default: 'png')
                 quality: Image quality for JPEG format (1-100, default: 90)
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
 
             Returns:
                 Success message with file path if filename provided, otherwise base64 encoded image data URL
@@ -565,11 +659,11 @@ class FoxMCPTools:
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "tabs.captureVisibleTab",
-                "data": {
+                "data": self._with_route({
                     **({"windowId": window_id} if window_id else {}),
                     "format": format,
                     "quality": quality
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -684,10 +778,18 @@ class FoxMCPTools:
 
             Returns information about the browser extension connection
             """
-            if not hasattr(self.websocket_server, 'connected_clients'):
-                return "WebSocket server doesn't track connected clients"
-
             try:
+                if hasattr(self.websocket_server, "list_connections"):
+                    connections = self.websocket_server.list_connections()
+                    active_id = getattr(self.websocket_server, "active_connection_id", None)
+                    return (
+                        f"WebSocket status: {len(connections)} browser extension(s) connected; "
+                        f"active connection: {active_id or 'none'}"
+                    )
+
+                if not hasattr(self.websocket_server, 'connected_clients'):
+                    return "WebSocket server doesn't track connected clients"
+
                 client_count = len(getattr(self.websocket_server, 'connected_clients', []))
                 return f"WebSocket status: {client_count} browser extension(s) connected"
             except Exception as e:
@@ -1031,6 +1133,8 @@ class FoxMCPTools:
         class NavigationBackParams(BaseModel):
             """Parameters for navigating back"""
             tab_id: int = Field(description="ID of the tab to navigate back in")
+            connection_id: Optional[str] = Field(default=None, description="Optional connection ID to route this call to")
+            profile: Optional[str] = Field(default=None, description="Optional profile/connection name to route this call to")
 
         @self.mcp.tool()
         async def navigation_back(params: NavigationBackParams) -> str:
@@ -1039,9 +1143,9 @@ class FoxMCPTools:
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "navigation.back",
-                "data": {
+                "data": self._with_route({
                     "tabId": params.tab_id
-                },
+                }, params.connection_id, params.profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1062,6 +1166,8 @@ class FoxMCPTools:
         class NavigationForwardParams(BaseModel):
             """Parameters for navigating forward"""
             tab_id: int = Field(description="ID of the tab to navigate forward in")
+            connection_id: Optional[str] = Field(default=None, description="Optional connection ID to route this call to")
+            profile: Optional[str] = Field(default=None, description="Optional profile/connection name to route this call to")
 
         @self.mcp.tool()
         async def navigation_forward(params: NavigationForwardParams) -> str:
@@ -1070,9 +1176,9 @@ class FoxMCPTools:
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "navigation.forward",
-                "data": {
+                "data": self._with_route({
                     "tabId": params.tab_id
-                },
+                }, params.connection_id, params.profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1091,21 +1197,28 @@ class FoxMCPTools:
 
         # Reload Page Tool
         @self.mcp.tool()
-        async def navigation_reload(tab_id: int, bypass_cache: bool = False) -> str:
+        async def navigation_reload(
+            tab_id: int,
+            bypass_cache: bool = False,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Reload a page in a tab
 
             Args:
                 tab_id: ID of the tab to reload
                 bypass_cache: Whether to bypass cache when reloading (default: False)
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "navigation.reload",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id,
                     "bypassCache": bypass_cache
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1125,21 +1238,28 @@ class FoxMCPTools:
 
         # Go to URL Tool
         @self.mcp.tool()
-        async def navigation_go_to_url(tab_id: int, url: str) -> str:
+        async def navigation_go_to_url(
+            tab_id: int,
+            url: str,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Navigate to a specific URL in a tab
 
             Args:
                 tab_id: ID of the tab to navigate
                 url: URL to navigate to
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "navigation.go_to_url",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id,
                     "url": url
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1161,20 +1281,27 @@ class FoxMCPTools:
 
         # Get Page Text Tool
         @self.mcp.tool()
-        async def content_get_text(tab_id: int, max_length: Optional[int] = None) -> str:
+        async def content_get_text(
+            tab_id: int,
+            max_length: Optional[int] = None,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Get text content from a tab's page
 
             Args:
                 tab_id: ID of the tab to get content from
                 max_length: Optional maximum length of text to return (default: unlimited)
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "content.get_text",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1205,19 +1332,25 @@ class FoxMCPTools:
 
         # Get Page HTML Tool
         @self.mcp.tool()
-        async def content_get_html(tab_id: int) -> str:
+        async def content_get_html(
+            tab_id: int,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Get HTML content from a tab's page
 
             Args:
                 tab_id: ID of the tab to get HTML content from
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "content.get_html",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1243,21 +1376,28 @@ class FoxMCPTools:
 
         # Execute Script Tool
         @self.mcp.tool()
-        async def content_execute_script(tab_id: int, code: str) -> str:
+        async def content_execute_script(
+            tab_id: int,
+            code: str,
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
+        ) -> str:
             """Execute JavaScript code in a tab
 
             Args:
                 tab_id: ID of the tab to execute script in
                 code: JavaScript code to execute
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             request = {
                 "id": str(uuid.uuid4()),
                 "type": "request",
                 "action": "content.execute_script",
-                "data": {
+                "data": self._with_route({
                     "tabId": tab_id,
                     "script": code
-                },
+                }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -1285,7 +1425,9 @@ class FoxMCPTools:
         async def content_execute_predefined(
             tab_id: int,
             script_name: str,
-            script_args: str = ""
+            script_args: str = "",
+            connection_id: Optional[str] = None,
+            profile: Optional[str] = None
         ) -> str:
             """Execute a predefined external script and run its JavaScript output in a tab
 
@@ -1294,6 +1436,8 @@ class FoxMCPTools:
                 script_name: Name of the external script to run
                 script_args: JSON array of strings to pass to the external script (e.g., '["arg1", "arg2"]')
                             or empty string for no arguments
+                connection_id: Optional connection ID to route this call to
+                profile: Optional profile/connection name to route this call to
             """
             # Get the scripts directory from environment variable
             scripts_dir = os.environ.get('FOXMCP_EXT_SCRIPTS')
@@ -1364,10 +1508,10 @@ class FoxMCPTools:
                     "id": str(uuid.uuid4()),
                     "type": "request",
                     "action": "content.execute_script",
-                    "data": {
+                    "data": self._with_route({
                         "tabId": tab_id,
                         "script": javascript_code
-                    },
+                    }, connection_id, profile),
                     "timestamp": datetime.now().isoformat()
                 }
 

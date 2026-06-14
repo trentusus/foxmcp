@@ -118,7 +118,35 @@ export FOXMCP_DEBUG=1
 
 ## Multiple Server Instances
 
-You can run multiple FoxMCP servers on different ports:
+FoxMCP can keep multiple extension connections open on one server. This is the preferred setup when you want one MCP namespace to operate against several Firefox profiles.
+
+1. Start the normal server on WebSocket `8765` and MCP `3000`
+2. Open both Firefox profiles with the FoxMCP extension installed
+3. Use `connections_list` to see connected sessions
+4. Use `connections_select` with a connection ID, or an exact configured profile/connection label, before running tab/content/navigation tools
+
+Optional profile labels can be set in each Firefox profile's extension local or sync storage:
+
+```javascript
+await browser.storage.local.set({ profileName: "foxmcp" });
+await browser.storage.local.set({ profileName: "kodens" });
+```
+
+Firefox WebExtensions do not expose the actual profile path or profile name to extensions, so unlabeled sessions must be selected by connection ID.
+
+For local verification with an unsigned development build, `web-ext run` can load the extension temporarily into profile copies:
+
+```bash
+npx --yes web-ext run \
+  --source-dir extension \
+  --firefox /Applications/Firefox.app/Contents/MacOS/firefox \
+  --firefox-profile "$HOME/Library/Application Support/Firefox/Profiles/foxmcp" \
+  --no-reload --no-input --start-url about:blank --args=-no-remote
+```
+
+On standard Firefox builds, a copied XPI in a normal app profile may install but not run unless it is signed or loaded through the Firefox development workflow.
+
+You can still run multiple FoxMCP servers on different ports when you need hard isolation or separate MCP namespaces:
 
 ```bash
 # Server 1 - Default ports
@@ -130,6 +158,8 @@ python server/server.py --port 8766 --mcp-port 3001
 # Server 3 - WebSocket only
 python server/server.py --port 8767 --no-mcp
 ```
+
+Separate server instances are simpler to reason about operationally, but each Firefox profile must point its extension at a different WebSocket port and each MCP client must connect to a different MCP URL. The multi-connection server keeps one MCP URL and avoids profile stealing, while routing is handled by connection selection.
 
 ## Docker Configuration
 

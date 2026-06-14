@@ -160,7 +160,9 @@ MCP Client
 ## Scalability Considerations
 
 ### 1. Connection Management
-- **Single Extension Connection**: One extension per server instance
+- **Multiple Extension Connections**: Multiple Firefox profiles can connect to one server instance
+- **Active Connection Alias**: Existing tools target the currently selected/default extension connection
+- **Connection Routing**: MCP clients can list and select extension sessions before running browser tools
 - **Multiple MCP Clients**: Multiple clients can connect to same server
 - **Reconnection Logic**: Automatic reconnection on connection loss
 
