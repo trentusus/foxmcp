@@ -63,6 +63,8 @@ Firefox WebExtensions do not expose the actual Firefox profile path/name. The ex
 
 For local multi-profile verification on standard Firefox builds, prefer `npx --yes web-ext run --source-dir $FM_ROOT/extension --firefox /Applications/Firefox.app/Contents/MacOS/firefox --firefox-profile "<profile dir>" --no-reload --no-input --start-url about:blank --args=-no-remote`. A copied unsigned XPI may appear installed in a normal app profile without running its background script until loaded through the development workflow or signed.
 
+The normal `foxmcp` profile also has a private unlisted Mozilla-signed local add-on installed with ID `foxmcp-local-trentusus@codemud.org`. Do not sign or install local builds with upstream ID `foxmcp@codemud.org`; that ID belongs to the public FoxMCP add-on/project and AMO will reject local signing attempts from this account. Rebuilt signed local add-ons require a manifest version bump or an AMO unlisted update submission, and AMO API credentials must stay in 1Password or environment variables.
+
 # Debugging Configuration
 
 ## ENABLE_DEBUG_LOGGING_TO_SERVER Setting

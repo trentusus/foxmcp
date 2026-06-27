@@ -146,6 +146,14 @@ npx --yes web-ext run \
 
 On standard Firefox builds, a copied XPI in a normal app profile may install but not run unless it is signed or loaded through the Firefox development workflow.
 
+The local `foxmcp` profile can use a private unlisted Mozilla-signed build for persistent normal startup. This machine signs a local copy with add-on ID `foxmcp-local-trentusus@codemud.org`; the upstream `foxmcp@codemud.org` ID belongs to the public FoxMCP add-on/project and should not be reused for local AMO signing. After signing, install the signed XPI into:
+
+```text
+$HOME/Library/Application Support/Firefox/Profiles/foxmcp/extensions/foxmcp-local-trentusus@codemud.org.xpi
+```
+
+When rebuilding the signed local add-on, bump the manifest version or submit an update to the existing unlisted AMO add-on, then re-sign with `web-ext sign --channel=unlisted`. AMO API credentials should stay in 1Password or environment variables and must not be committed.
+
 You can still run multiple FoxMCP servers on different ports when you need hard isolation or separate MCP namespaces:
 
 ```bash
