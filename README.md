@@ -149,6 +149,7 @@ Once connected, you can control Firefox through natural language:
 - Extract page text and HTML
 - Execute JavaScript in pages
 - Run custom predefined scripts
+- Large DOM/script results are bounded before WebSocket send; use `max_length` or `max_result_bytes` for heavy pages. Oversized results return `RESPONSE_TOO_LARGE` with retry guidance instead of dropping the extension connection.
 
 ### Navigation
 - Back, forward, reload pages

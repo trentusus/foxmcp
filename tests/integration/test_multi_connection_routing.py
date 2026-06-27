@@ -150,6 +150,7 @@ async def test_mcp_tab_navigation_content_tools_forward_explicit_route_fields():
     assert captured[1]["data"]["connection_id"] == "conn_test"
     assert captured[2]["data"]["profile"] == "foxmcp"
     assert captured[3]["data"]["connection_id"] == "conn_text"
+    assert captured[3]["data"]["maxLength"] == 100
 
 
 @pytest.mark.asyncio

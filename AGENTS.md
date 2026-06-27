@@ -65,6 +65,9 @@ For local multi-profile verification on standard Firefox builds, prefer `npx --y
 
 The normal `foxmcp` profile also has a private unlisted Mozilla-signed local add-on installed with ID `foxmcp-local-trentusus@codemud.org`. Do not sign or install local builds with upstream ID `foxmcp@codemud.org`; that ID belongs to the public FoxMCP add-on/project and AMO will reject local signing attempts from this account. Rebuilt signed local add-ons require a manifest version bump or an AMO unlisted update submission, and AMO API credentials must stay in 1Password or environment variables.
 
+## WebSocket Payload Limits
+FoxMCP has a 1 MiB application payload limit by default (`FOXMCP_MAX_PAYLOAD_BYTES`) and a larger WebSocket receive ceiling (`FOXMCP_WEBSOCKET_MAX_MESSAGE_BYTES`) so oversized extension responses can be classified instead of closing with WebSocket code 1009. New tools that can return page-derived content, DOM snapshots, accessibility trees, screenshots, captured request bodies, or script results must expose bounded options such as `max_length`, `max_result_bytes`, pagination, file output, or truncation metadata. Do not silently drop content: return `truncated: true` metadata or a structured `RESPONSE_TOO_LARGE` / `response_too_large` error with retry guidance. Avoid logging full oversized payloads.
+
 # Debugging Configuration
 
 ## ENABLE_DEBUG_LOGGING_TO_SERVER Setting

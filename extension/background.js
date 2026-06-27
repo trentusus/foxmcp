@@ -8,6 +8,10 @@
 let websocket = null;
 let isConnected = false;
 
+const MAX_WEBSOCKET_PAYLOAD_BYTES = 1024 * 1024;
+const RESPONSE_PAYLOAD_HEADROOM_BYTES = 8192;
+const DEFAULT_CONTENT_MAX_LENGTH = 200000;
+const DEFAULT_SCRIPT_RESULT_MAX_LENGTH = 200000;
 
 // Debug logging configuration - set to true to send extension logs to server
 const ENABLE_DEBUG_LOGGING_TO_SERVER = false;
@@ -336,6 +340,69 @@ function disconnect() {
   isConnected = false;
 }
 
+function byteLength(value) {
+  return new TextEncoder().encode(String(value)).length;
+}
+
+function truncateStringToBytes(value, maxBytes) {
+  const text = String(value);
+  if (byteLength(text) <= maxBytes) {
+    return { value: text, truncated: false, originalLength: text.length };
+  }
+
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    if (byteLength(text.slice(0, mid)) <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return {
+    value: text.slice(0, low),
+    truncated: true,
+    originalLength: text.length
+  };
+}
+
+function structuredCloneWithLimits(value, maxStringBytes) {
+  if (typeof value === 'string') {
+    const truncated = truncateStringToBytes(value, maxStringBytes);
+    return {
+      value: truncated.value,
+      truncated: truncated.truncated,
+      originalLength: truncated.originalLength
+    };
+  }
+
+  let serialized;
+  let serializationFailed = false;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    serialized = String(value);
+    serializationFailed = true;
+  }
+
+  if (byteLength(serialized) <= maxStringBytes) {
+    if (serializationFailed) {
+      return { value: serialized, truncated: false, originalLength: serialized.length, serialized: true };
+    }
+    return { value, truncated: false, originalLength: serialized.length };
+  }
+
+  const truncated = truncateStringToBytes(serialized, maxStringBytes);
+  return {
+    value: truncated.value,
+    truncated: true,
+    originalLength: serialized.length,
+    serialized: true
+  };
+}
+
 async function handleMessage(message) {
   const { id, type, action, data } = message;
 
@@ -389,7 +456,20 @@ function sendResponse(id, action, data) {
     timestamp: new Date().toISOString()
   };
 
-  websocket.send(JSON.stringify(message));
+  const serialized = JSON.stringify(message);
+  const sizeBytes = byteLength(serialized);
+  if (sizeBytes > MAX_WEBSOCKET_PAYLOAD_BYTES) {
+    sendError(id, 'RESPONSE_TOO_LARGE', `Response for ${action} is too large to send safely`, {
+      error: 'response_too_large',
+      action,
+      actualBytes: sizeBytes,
+      maxBytes: MAX_WEBSOCKET_PAYLOAD_BYTES,
+      retryHint: 'Retry with a smaller max_length, a narrower script result, or request a file-backed result where available.'
+    });
+    return;
+  }
+
+  websocket.send(serialized);
 }
 
 function sendError(id, code, message, details = {}) {
@@ -671,18 +751,34 @@ async function handleContentAction(id, action, data) {
     switch (action) {
       case 'content.text':
       case 'content.get_text':
+        const textMaxLength = Number.isInteger(data.maxLength) && data.maxLength > 0
+          ? data.maxLength
+          : DEFAULT_CONTENT_MAX_LENGTH;
         const textResult = await sendMessageWithRetry(data.tabId, {
-          action: 'extractText'
+          action: 'extractText',
+          maxLength: textMaxLength
         });
-        sendResponse(id, action, { text: textResult.text });
+        sendResponse(id, action, {
+          ...textResult,
+          url: await getCurrentTabUrl(data.tabId),
+          title: textResult.title || ''
+        });
         break;
 
       case 'content.html':
       case 'content.get_html':
+        const htmlMaxLength = Number.isInteger(data.maxLength) && data.maxLength > 0
+          ? data.maxLength
+          : DEFAULT_CONTENT_MAX_LENGTH;
         const htmlResult = await sendMessageWithRetry(data.tabId, {
-          action: 'extractHTML'
+          action: 'extractHTML',
+          maxLength: htmlMaxLength
         });
-        sendResponse(id, action, { html: htmlResult.html });
+        sendResponse(id, action, {
+          ...htmlResult,
+          url: await getCurrentTabUrl(data.tabId),
+          title: htmlResult.title || ''
+        });
         break;
 
       case 'content.execute':
@@ -693,9 +789,23 @@ async function handleContentAction(id, action, data) {
           });
           // executeScript returns an array of results from each frame
           const result = executeResults && executeResults.length > 0 ? executeResults[0] : null;
+          const scriptMaxBytes = Math.max(
+            1024,
+            Math.min(
+              Number.isInteger(data.maxResultBytes) && data.maxResultBytes > 0
+                ? data.maxResultBytes
+                : DEFAULT_SCRIPT_RESULT_MAX_LENGTH,
+              MAX_WEBSOCKET_PAYLOAD_BYTES - RESPONSE_PAYLOAD_HEADROOM_BYTES
+            )
+          );
+          const limitedResult = structuredCloneWithLimits(result, scriptMaxBytes);
           sendResponse(id, action, { 
-            result: result,
-            url: await getCurrentTabUrl(data.tabId)
+            result: limitedResult.value,
+            url: await getCurrentTabUrl(data.tabId),
+            truncated: limitedResult.truncated,
+            originalLength: limitedResult.originalLength,
+            serialized: limitedResult.serialized || false,
+            maxResultBytes: scriptMaxBytes
           });
         } catch (scriptError) {
           sendError(id, 'SCRIPT_ERROR', `Script execution failed: ${scriptError.message}`);

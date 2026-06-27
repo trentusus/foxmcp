@@ -39,10 +39,14 @@ Complete reference for all MCP tools and browser functions available through Fox
 
 ### Content Access
 - `content_get_text(tab_id, max_length=None)` - Extract page text content
-  - `max_length`: Optional maximum length of text to return (default: unlimited)
-- `content_get_html(tab_id)` - Get page HTML source
-- `content_execute_script(tab_id, script)` - Execute JavaScript directly
+  - `max_length`: Optional maximum length of text to return. Large pages are bounded by the extension even when omitted and include truncation metadata.
+- `content_get_html(tab_id, max_length=None)` - Get page HTML source
+  - `max_length`: Optional maximum length of HTML to return. Large HTML responses are bounded and include truncation metadata.
+- `content_execute_script(tab_id, script, max_result_bytes=None)` - Execute JavaScript directly
+  - `max_result_bytes`: Optional byte budget for the serialized script result. Huge string, array, or object results are truncated with metadata or rejected as `RESPONSE_TOO_LARGE`.
 - `content_execute_predefined(tab_id, script_name, script_args="")` - Execute predefined external scripts
+
+FoxMCP applies a 1 MiB application payload limit to WebSocket messages by default. Oversized extension responses return a structured `RESPONSE_TOO_LARGE` error with `actualBytes`, `maxBytes`, and retry guidance instead of dropping the extension connection.
 
 ### Web Request Monitoring
 - `requests_start_monitoring(url_patterns, options=None, tab_id=None)` - Start monitoring web requests
@@ -136,7 +140,7 @@ await client.call_tool("bookmarks_update", {
 
 ### Content Interaction
 ```python
-# Get page text (unlimited)
+# Get page text (bounded by the extension if omitted)
 text = await client.call_tool("content_get_text", {"tab_id": 123})
 
 # Get page text with length limit
@@ -148,7 +152,8 @@ text = await client.call_tool("content_get_text", {
 # Execute JavaScript
 result = await client.call_tool("content_execute_script", {
     "tab_id": 123,
-    "script": "document.title"
+    "script": "document.title",
+    "max_result_bytes": 100000
 })
 ```
 

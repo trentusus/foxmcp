@@ -1300,7 +1300,8 @@ class FoxMCPTools:
                 "type": "request",
                 "action": "content.get_text",
                 "data": self._with_route({
-                    "tabId": tab_id
+                    "tabId": tab_id,
+                    **({"maxLength": max_length} if max_length is not None else {})
                 }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
@@ -1314,16 +1315,21 @@ class FoxMCPTools:
                 text = response["data"].get("text", "")
                 url = response["data"].get("url", "Unknown URL")
                 title = response["data"].get("title", "Unknown Title")
+                truncated = response["data"].get("truncated", False)
+                original_length = response["data"].get("originalLength")
+                applied_max_length = response["data"].get("maxLength")
 
                 if not text:
                     return f"No text content found in tab {tab_id} ({title})"
 
-                # Apply length limit if specified
-                if max_length is not None and len(text) > max_length:
-                    truncated_text = text[:max_length]
-                    return f"Text content from {title} ({url}):\n\n{truncated_text}..."
-                else:
-                    return f"Text content from {title} ({url}):\n\n{text}"
+                suffix = ""
+                if truncated:
+                    length_label = original_length if original_length is not None else "unknown"
+                    suffix = (
+                        f"\n\n[truncated: true, original_length: {length_label}, "
+                        f"max_length: {applied_max_length}]"
+                    )
+                return f"Text content from {title} ({url}):\n\n{text}{suffix}"
             elif response.get("type") == "error":
                 error_msg = response.get("data", {}).get("message", "Unknown error")
                 return f"Failed to get page text: {error_msg}"
@@ -1334,6 +1340,7 @@ class FoxMCPTools:
         @self.mcp.tool()
         async def content_get_html(
             tab_id: int,
+            max_length: Optional[int] = None,
             connection_id: Optional[str] = None,
             profile: Optional[str] = None
         ) -> str:
@@ -1341,6 +1348,7 @@ class FoxMCPTools:
 
             Args:
                 tab_id: ID of the tab to get HTML content from
+                max_length: Optional maximum length of HTML to return (default: bounded by extension)
                 connection_id: Optional connection ID to route this call to
                 profile: Optional profile/connection name to route this call to
             """
@@ -1349,7 +1357,8 @@ class FoxMCPTools:
                 "type": "request",
                 "action": "content.get_html",
                 "data": self._with_route({
-                    "tabId": tab_id
+                    "tabId": tab_id,
+                    **({"maxLength": max_length} if max_length is not None else {})
                 }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
@@ -1363,11 +1372,21 @@ class FoxMCPTools:
                 html = response["data"].get("html", "")
                 url = response["data"].get("url", "Unknown URL")
                 title = response["data"].get("title", "Unknown Title")
+                truncated = response["data"].get("truncated", False)
+                original_length = response["data"].get("originalLength")
+                applied_max_length = response["data"].get("maxLength")
 
                 if not html:
                     return f"No HTML content found in tab {tab_id} ({title})"
 
-                return f"HTML content from {title} ({url}):\n\n{html[:2000]}{'...' if len(html) > 2000 else ''}"
+                suffix = ""
+                if truncated:
+                    length_label = original_length if original_length is not None else "unknown"
+                    suffix = (
+                        f"\n\n[truncated: true, original_length: {length_label}, "
+                        f"max_length: {applied_max_length}]"
+                    )
+                return f"HTML content from {title} ({url}):\n\n{html}{suffix}"
             elif response.get("type") == "error":
                 error_msg = response.get("data", {}).get("message", "Unknown error")
                 return f"Failed to get page HTML: {error_msg}"
@@ -1379,6 +1398,7 @@ class FoxMCPTools:
         async def content_execute_script(
             tab_id: int,
             code: str,
+            max_result_bytes: Optional[int] = None,
             connection_id: Optional[str] = None,
             profile: Optional[str] = None
         ) -> str:
@@ -1387,6 +1407,7 @@ class FoxMCPTools:
             Args:
                 tab_id: ID of the tab to execute script in
                 code: JavaScript code to execute
+                max_result_bytes: Optional byte budget for the serialized script result
                 connection_id: Optional connection ID to route this call to
                 profile: Optional profile/connection name to route this call to
             """
@@ -1396,7 +1417,8 @@ class FoxMCPTools:
                 "action": "content.execute_script",
                 "data": self._with_route({
                     "tabId": tab_id,
-                    "script": code
+                    "script": code,
+                    **({"maxResultBytes": max_result_bytes} if max_result_bytes is not None else {})
                 }, connection_id, profile),
                 "timestamp": datetime.now().isoformat()
             }
@@ -1409,11 +1431,22 @@ class FoxMCPTools:
             if response.get("type") == "response" and "data" in response:
                 result = response["data"].get("result")
                 url = response["data"].get("url", "Unknown URL")
+                truncated = response["data"].get("truncated", False)
+                original_length = response["data"].get("originalLength")
+                result_was_serialized = response["data"].get("serialized", False)
+                applied_max_bytes = response["data"].get("maxResultBytes")
 
                 if result is None:
                     return f"Script executed successfully in tab {tab_id} ({url}) - no return value"
 
-                return f"Script result from tab {tab_id} ({url}):\n{result}"
+                suffix = ""
+                if truncated:
+                    length_label = original_length if original_length is not None else "unknown"
+                    suffix = (
+                        f"\n\n[truncated: true, original_length: {length_label}, "
+                        f"max_result_bytes: {applied_max_bytes}, serialized: {str(result_was_serialized).lower()}]"
+                    )
+                return f"Script result from tab {tab_id} ({url}):\n{result}{suffix}"
             elif response.get("type") == "error":
                 error_msg = response.get("data", {}).get("message", "Unknown error")
                 return f"Failed to execute script: {error_msg}"

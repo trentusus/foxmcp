@@ -32,7 +32,7 @@ class TestWebSocketCommunication:
     @pytest.mark.asyncio
     async def test_extension_connection(self):
         """Test extension can connect to server"""
-        server = FoxMCPServer(host="localhost", port=8767)
+        server = FoxMCPServer(host="localhost", port=8767, start_mcp=False)
 
         # Mock websocket server
         with patch('websockets.serve') as mock_serve:
@@ -54,6 +54,7 @@ class TestWebSocketCommunication:
                 server.handle_extension_connection,
                 "localhost",
                 8767,
+                max_size=server.websocket_max_message_bytes,
                 reuse_address=True
             )
 
@@ -188,3 +189,57 @@ class TestConnectionRecovery:
         server.extension_connection = None
 
         assert server.extension_connection is None
+
+
+class TestPayloadLimits:
+
+    @pytest.mark.asyncio
+    async def test_oversized_extension_response_is_bounded_and_connection_survives(self):
+        """A 3.8 MB extension response becomes a structured error and does not kill the session."""
+        server = FoxMCPServer(host="localhost", port=0, start_mcp=False)
+        mock_websocket = AsyncMock()
+        mock_websocket.remote_address = ("127.0.0.1", 12345)
+        server._register_connection(mock_websocket)
+
+        oversized_task = asyncio.create_task(server.send_request_and_wait({
+            "id": "oversized_req",
+            "type": "request",
+            "action": "content.get_text",
+            "data": {}
+        }, timeout=2))
+
+        await asyncio.sleep(0)
+        await server.handle_extension_message(json.dumps({
+            "id": "oversized_req",
+            "type": "response",
+            "action": "content.get_text",
+            "data": {"text": "x" * 3_834_224}
+        }), websocket=mock_websocket)
+
+        oversized_response = await oversized_task
+        assert oversized_response["type"] == "error"
+        assert oversized_response["data"]["code"] == "RESPONSE_TOO_LARGE"
+        assert oversized_response["data"]["details"]["error"] == "response_too_large"
+        assert oversized_response["data"]["details"]["actualBytes"] > server.max_payload_bytes
+        assert server._is_websocket_open(mock_websocket)
+
+        followup_task = asyncio.create_task(server.send_request_and_wait({
+            "id": "followup_req",
+            "type": "request",
+            "action": "tabs.list",
+            "data": {}
+        }, timeout=2))
+
+        await asyncio.sleep(0)
+        sent_followup = json.loads(mock_websocket.send.call_args[0][0])
+        assert sent_followup["id"] == "followup_req"
+        await server.handle_extension_message(json.dumps({
+            "id": "followup_req",
+            "type": "response",
+            "action": "tabs.list",
+            "data": {"tabs": []}
+        }), websocket=mock_websocket)
+
+        followup_response = await followup_task
+        assert followup_response["type"] == "response"
+        assert followup_response["data"]["tabs"] == []

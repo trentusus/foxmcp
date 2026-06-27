@@ -13,6 +13,7 @@ import logging
 import socket
 import sys
 import os
+import re
 import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -38,6 +39,11 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_PAYLOAD_BYTES = int(os.environ.get("FOXMCP_MAX_PAYLOAD_BYTES", str(1024 * 1024)))
+DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES = int(
+    os.environ.get("FOXMCP_WEBSOCKET_MAX_MESSAGE_BYTES", str(max(DEFAULT_MAX_PAYLOAD_BYTES * 8, DEFAULT_MAX_PAYLOAD_BYTES)))
+)
+
 def find_available_port(start_port=3000, max_attempts=100):
     """Find an available port starting from start_port"""
     if HAS_PORT_COORDINATOR:
@@ -61,9 +67,19 @@ def find_available_port(start_port=3000, max_attempts=100):
     raise RuntimeError(f"Could not find available port starting from {start_port}")
 
 class FoxMCPServer:
-    def __init__(self, host: str = "localhost", port: int = 8765, mcp_port: int = None, start_mcp: bool = True):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 8765,
+        mcp_port: int = None,
+        start_mcp: bool = True,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+        websocket_max_message_bytes: int = DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES
+    ):
         self.host = host
         self.port = port
+        self.max_payload_bytes = max_payload_bytes
+        self.websocket_max_message_bytes = max(websocket_max_message_bytes, max_payload_bytes)
 
         # Set MCP port - default to 3000 for production, dynamic allocation only for tests
         if mcp_port is None:
@@ -190,6 +206,70 @@ class FoxMCPServer:
         connection["last_seen"] = datetime.now().isoformat()
         logger.info(f"Updated extension metadata for {connection_id}: {connection['metadata']}")
 
+    def _message_size_bytes(self, message) -> int:
+        if isinstance(message, bytes):
+            return len(message)
+        return len(str(message).encode("utf-8"))
+
+    def _extract_json_string_field(self, message: str, field: str) -> Optional[str]:
+        match = re.search(rf'"{re.escape(field)}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', message)
+        if not match:
+            return None
+        try:
+            return json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            return match.group(1)
+
+    def _oversized_error_response(
+        self,
+        request_id: Optional[str],
+        action: Optional[str],
+        actual_bytes: int,
+        source: str
+    ) -> Dict[str, Any]:
+        retry_hint = (
+            "Retry with a smaller request, for example content_get_text(max_length=...), "
+            "a narrower selector/script result, or save large screenshots to a file."
+        )
+        return {
+            "id": request_id,
+            "type": "error",
+            "action": action or "",
+            "data": {
+                "code": "RESPONSE_TOO_LARGE",
+                "message": (
+                    f"{source} payload was {actual_bytes} bytes, exceeding the "
+                    f"{self.max_payload_bytes} byte FoxMCP limit."
+                ),
+                "details": {
+                    "error": "response_too_large",
+                    "actualBytes": actual_bytes,
+                    "maxBytes": self.max_payload_bytes,
+                    "retryHint": retry_hint,
+                }
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+
+    async def _handle_oversized_extension_message(self, message: str, actual_bytes: int):
+        request_id = self._extract_json_string_field(message, "id")
+        action = self._extract_json_string_field(message, "action")
+        message_type = self._extract_json_string_field(message, "type")
+
+        logger.warning(
+            "Rejected oversized extension %s for action %s (ID: %s): %s bytes exceeds %s",
+            message_type or "message",
+            action or "unknown",
+            request_id or "unknown",
+            actual_bytes,
+            self.max_payload_bytes,
+        )
+
+        if request_id and request_id in self.pending_requests:
+            await self.handle_extension_response(
+                self._oversized_error_response(request_id, action, actual_bytes, "Extension response")
+            )
+
     def _resolve_connection_id(self, connection_id: Optional[str] = None, profile: Optional[str] = None) -> Optional[str]:
         identifier = connection_id or profile
         if not identifier:
@@ -250,6 +330,11 @@ class FoxMCPServer:
     async def handle_extension_message(self, message: str, websocket=None):
         """Process message from browser extension"""
         try:
+            actual_bytes = self._message_size_bytes(message)
+            if actual_bytes > self.max_payload_bytes:
+                await self._handle_oversized_extension_message(message, actual_bytes)
+                return
+
             data = json.loads(message)
             message_type = data.get('type', 'unknown')
             message_id = data.get('id')
@@ -369,7 +454,18 @@ class FoxMCPServer:
 
         try:
             message['timestamp'] = datetime.now().isoformat()
-            await websocket.send(json.dumps(message))
+            serialized = json.dumps(message)
+            size_bytes = self._message_size_bytes(serialized)
+            if size_bytes > self.max_payload_bytes:
+                logger.error(
+                    "Refusing to send oversized server payload for action %s (ID: %s): %s bytes exceeds %s",
+                    message.get("action", "unknown"),
+                    message.get("id", "unknown"),
+                    size_bytes,
+                    self.max_payload_bytes,
+                )
+                return False
+            await websocket.send(serialized)
             return True
         except Exception as e:
             logger.error(f"Error sending to extension: {e}")
@@ -770,6 +866,7 @@ class FoxMCPServer:
             self.handle_extension_connection,
             self.host,
             self.port,
+            max_size=self.websocket_max_message_bytes,
             reuse_address=True  # Enable SO_REUSEADDR for immediate port reuse
         )
 

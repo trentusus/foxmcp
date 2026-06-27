@@ -266,12 +266,15 @@ server = FoxMCPServer()
 ```python
 # Adjust WebSocket settings for performance
 server = FoxMCPServer(
-    max_size=1000000,  # Max message size
+    max_payload_bytes=1048576,  # Max FoxMCP application payload size
+    websocket_max_message_bytes=8388608,  # Transport receive ceiling for classifying oversize responses
     ping_interval=20,  # Ping interval (seconds)
     ping_timeout=10,   # Ping timeout (seconds)
     close_timeout=10   # Close timeout (seconds)
 )
 ```
+
+Payload limits can also be set with `FOXMCP_MAX_PAYLOAD_BYTES` and `FOXMCP_WEBSOCKET_MAX_MESSAGE_BYTES`. Keep the WebSocket transport ceiling at or above the application payload limit so the server can return a structured `RESPONSE_TOO_LARGE` error instead of closing the connection with WebSocket code 1009. Tool authors should expose bounded options such as `max_length` or `max_result_bytes` for any page, DOM, screenshot, accessibility, or script result that can grow with webpage content.
 
 ### MCP Server Optimization
 

@@ -37,7 +37,15 @@ def auto_dynamic_ports():
         from server.server import FoxMCPServer
         original_init = FoxMCPServer.__init__
 
-        def patched_init(self, host="localhost", port=None, mcp_port=None, start_mcp=True):
+        def patched_init(
+            self,
+            host="localhost",
+            port=None,
+            mcp_port=None,
+            start_mcp=True,
+            max_payload_bytes=None,
+            websocket_max_message_bytes=None
+        ):
             # ALWAYS allocate dynamic ports in test environment to prevent conflicts
             # This overrides any explicit port to ensure complete isolation
             if port is None or port == 8765:  # Override default port
@@ -53,7 +61,17 @@ def auto_dynamic_ports():
             print(f"🔧 Test server using WebSocket port: {port}, MCP port: {mcp_port}")
 
             # Call original init with dynamic ports
-            return original_init(self, host=host, port=port, mcp_port=mcp_port, start_mcp=start_mcp)
+            kwargs = {
+                "host": host,
+                "port": port,
+                "mcp_port": mcp_port,
+                "start_mcp": start_mcp,
+            }
+            if max_payload_bytes is not None:
+                kwargs["max_payload_bytes"] = max_payload_bytes
+            if websocket_max_message_bytes is not None:
+                kwargs["websocket_max_message_bytes"] = websocket_max_message_bytes
+            return original_init(self, **kwargs)
 
         # Apply the patch
         with patch.object(FoxMCPServer, '__init__', patched_init):

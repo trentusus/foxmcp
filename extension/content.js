@@ -11,6 +11,7 @@ console.log('FoxMCP content script loaded');
 let responseBodyCaptureEnabled = false;
 let capturedResponses = new Map(); // requestId -> responseData
 let monitorConfig = null;
+const DEFAULT_CONTENT_RESPONSE_MAX_LENGTH = 200000;
 
 // Store original fetch and XMLHttpRequest for restoration
 const originalFetch = window.fetch;
@@ -345,6 +346,86 @@ function restoreOriginalImplementations() {
   console.log('🔄 Restored original fetch and XMLHttpRequest implementations');
 }
 
+function normalizeMaxLength(maxLength) {
+  if (Number.isInteger(maxLength) && maxLength > 0) {
+    return maxLength;
+  }
+  return DEFAULT_CONTENT_RESPONSE_MAX_LENGTH;
+}
+
+function truncateTextResult(text, maxLength) {
+  const limit = normalizeMaxLength(maxLength);
+  const value = String(text || '');
+  if (value.length <= limit) {
+    return {
+      value,
+      truncated: false,
+      originalLength: value.length,
+      maxLength: limit
+    };
+  }
+
+  return {
+    value: value.slice(0, limit),
+    truncated: true,
+    originalLength: value.length,
+    maxLength: limit
+  };
+}
+
+function collectTextResult(root, maxLength) {
+  const limit = normalizeMaxLength(maxLength);
+  if (!root) {
+    return {
+      value: '',
+      truncated: false,
+      originalLength: 0,
+      originalLengthKnown: true,
+      maxLength: limit
+    };
+  }
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const parts = [];
+  let collectedLength = 0;
+  let truncated = false;
+
+  while (collectedLength < limit) {
+    const node = walker.nextNode();
+    if (!node) {
+      break;
+    }
+
+    const text = node.nodeValue || '';
+    if (!text) {
+      continue;
+    }
+
+    const remaining = limit - collectedLength;
+    if (text.length > remaining) {
+      parts.push(text.slice(0, remaining));
+      collectedLength += remaining;
+      truncated = true;
+      break;
+    }
+
+    parts.push(text);
+    collectedLength += text.length;
+  }
+
+  if (!truncated && walker.nextNode()) {
+    truncated = true;
+  }
+
+  return {
+    value: parts.join(''),
+    truncated,
+    originalLength: truncated ? null : collectedLength,
+    originalLengthKnown: !truncated,
+    maxLength: limit
+  };
+}
+
 // Listen for messages from background script
 browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const { action, script, data } = request;
@@ -354,11 +435,27 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
   try {
     switch (action) {
       case 'extractText':
-        sendResponse({ text: document.body.innerText });
+        const textResult = collectTextResult(document.body, request.maxLength);
+        sendResponse({
+          text: textResult.value,
+          title: document.title,
+          truncated: textResult.truncated,
+          originalLength: textResult.originalLength,
+          originalLengthKnown: textResult.originalLengthKnown,
+          maxLength: textResult.maxLength
+        });
         break;
 
       case 'extractHTML':
-        sendResponse({ html: document.documentElement.outerHTML });
+        const htmlResult = truncateTextResult(document.documentElement ? document.documentElement.outerHTML : '', request.maxLength);
+        sendResponse({
+          html: htmlResult.value,
+          title: document.title,
+          truncated: htmlResult.truncated,
+          originalLength: htmlResult.originalLength,
+          originalLengthKnown: true,
+          maxLength: htmlResult.maxLength
+        });
         break;
 
       case 'getPageTitle':
